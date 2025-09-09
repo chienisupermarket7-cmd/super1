@@ -1,5 +1,6 @@
 fastapi==0.111.1
 uvicorn[standard]==0.23.2
+gunicorn==21.2.0
 pymysql==1.1.0
 python-dotenv==1.1.1
 cloudinary==1.32.0
