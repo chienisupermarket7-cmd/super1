@@ -191,14 +191,8 @@ async def register(creds: Userregis):
         "status": "Registered successfully",
         "token": token
     }
-
 @app.api_route("/offers", methods=["GET", "POST"])
 async def offers(request: Request):
-    # ✅ Check if this is a browser request (likely visiting URL directly)
-    accept_header = request.headers.get("accept", "")
-    if "text/html" in accept_header:
-        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
-
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -208,15 +202,13 @@ async def offers(request: Request):
         product_id = data.get("product_id")
         new_price = data.get("new_price")
         offer_label = data.get("offer_label")
-        start_date = data.get("start_date")
-        end_date = data.get("end_date")
+        start_date = data.get("start_date")   # must be provided manually
+        end_date = data.get("end_date")       # must be provided manually
 
         if not product_id or not new_price:
-            cursor.close()
-            conn.close()
             raise HTTPException(status_code=400, detail="product_id and new_price are required")
 
-        # 🔥 Fetch old price
+        # 🔥 fetch old price from products table
         cursor.execute("SELECT UnitPrice FROM SupermarketProducts WHERE ProductID=%s", (product_id,))
         product = cursor.fetchone()
         if not product:
@@ -241,8 +233,9 @@ async def offers(request: Request):
 
         cursor.close()
         conn.close()
-        return JSONResponse(content={"status": "Offer saved successfully"})
+        return {"status": "Offer saved successfully"}
 
+    # -------- GET: Customers fetch active offers --------
     elif request.method == "GET":
         sql = """
         SELECT p.ProductID, p.ProductName, p.Description,
@@ -271,7 +264,8 @@ async def offers(request: Request):
                 "image_url": generate_signed_url(row["image_filename"]) if row["image_filename"] else None
             })
 
-        return JSONResponse(content={"status": "OK", "data": offers})
+        return {"status": "OK", "data": offers}
+
 
 @app.post("/upload")
 async def upload_file(
@@ -339,12 +333,6 @@ async def upload_file(
 
 @app.get("/viewchieni")
 async def view_memos(request: Request):
-    # Check if the request is from a browser expecting HTML
-    accept_header = request.headers.get("accept", "")
-    if "text/html" in accept_header:
-        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
-
-    # Otherwise, return JSON (API response)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM SupermarketProducts")
@@ -353,6 +341,7 @@ async def view_memos(request: Request):
 
     products = []
     for row in rows:
+        # ✅ Generate signed URL from public_id
         image_url = generate_signed_url(row['image_filename'])
         product_data = {
             'id': row['ProductID'],
@@ -365,7 +354,7 @@ async def view_memos(request: Request):
             'description': row['Description'],
             'image_url': image_url
         }
+
         products.append(product_data)
 
-    return JSONResponse(content={"status": "OK", "data": products})
-
+    return {"status": "OK", "data": products}
