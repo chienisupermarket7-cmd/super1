@@ -5,24 +5,25 @@ import pymysql
 import os
 from dotenv import load_dotenv
 import hashlib
+from jose import jwt, JWTError, ExpiredSignatureError
 import cloudinary
 import cloudinary.uploader
 from cloudinary.utils import cloudinary_url
+from pathlib import Path
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from urllib.parse import quote
+from datetime import datetime, timedelta, date
 from functools import partial
 import asyncio
-from jose import jwt, JWTError, ExpiredSignatureError
+from decimal import Decimal
 
+# ---------------- APP SETUP ----------------
 app = FastAPI()
 
 ALGORITHM = "HS256"
-ALLOWED_REFERRERS = ["https://chienisupermarket7-cmd.github.io"]
-
-# ✅ CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ Set to your frontend domain in production
+    allow_origins=["*"],  # ⚠️ Replace "*" with your domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,22 +31,22 @@ app.add_middleware(
 
 load_dotenv()
 
-# ✅ Environment variables
 SMTP_SERVER = os.getenv('SMTP_SERVER')
 SMTP_PORT = os.getenv('SMTP_PORT')
 SMTP_USER = os.getenv('SMTP_USER')
 SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
 SECRET_KEY = os.getenv('SECRET_KEY')
-
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
-# ✅ Cloudinary config
 cloudinary.config(
     cloud_name=os.getenv('CLOUD_NAME'),
     api_key=os.getenv('API_KEY'),
     api_secret=os.getenv('API_SECRET')
 )
 
+ALLOWED_REFERRERS = ["https://chienisupermarket7-cmd.github.io"]
+
+# ---------------- DB CONNECTION ----------------
 def get_db_connection():
     return pymysql.connect(
         host=os.getenv("DB_HOST"),
@@ -56,16 +57,7 @@ def get_db_connection():
         autocommit=True
     )
 
-class User(BaseModel):
-    email: str
-    password: str
-
-class Userregis(BaseModel):
-    email: str
-    name: str
-    phonenumber: int
-    password: str
-
+# ---------------- HELPERS ----------------
 def generate_signed_url(public_id: str) -> str:
     url, _ = cloudinary_url(
         public_id,
@@ -77,14 +69,33 @@ def generate_signed_url(public_id: str) -> str:
     )
     return url
 
-# ---------------- AUTH ----------------
+def serialize_value(value):
+    """Convert Decimals and datetime objects to JSON-safe types."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
 
+# ---------------- MODELS ----------------
+class User(BaseModel):
+    email: str
+    password: str
+
+class Userregis(BaseModel):
+    email: str
+    name: str
+    phonenumber: int
+    password: str
+
+# ---------------- AUTH ----------------
 @app.post("/login")
 async def login(creds: User):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM chieniusers WHERE email=%s", (creds.email,))
+    sql = "SELECT * FROM chieniusers WHERE email=%s"
+    cursor.execute(sql, (creds.email,))
     user = cursor.fetchone()
 
     if not user:
@@ -107,7 +118,8 @@ async def login(creds: User):
     }
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-    cursor.execute("UPDATE chieniusers SET token=%s WHERE email=%s", (token, user["email"]))
+    update_sql = "UPDATE users SET token=%s WHERE email=%s"
+    cursor.execute(update_sql, (token, user["email"]))
     conn.commit()
 
     cursor.close()
@@ -118,12 +130,25 @@ async def login(creds: User):
 
     return {"status": "Login successful", "user": user}
 
+def verify_token(authorization: str = Header(...)):
+    try:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=403, detail="Invalid authentication scheme")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except JWTError:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
 @app.post("/register")
 async def register(creds: Userregis):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM chieniusers WHERE email=%s", (creds.email,))
+    sql = "SELECT * FROM chieniusers WHERE email=%s"
+    cursor.execute(sql, (creds.email,))
     user = cursor.fetchone()
     if user:
         cursor.close()
@@ -131,38 +156,31 @@ async def register(creds: Userregis):
         raise HTTPException(status_code=400, detail="This user already exists")
 
     hashed_password = hashlib.sha256(creds.password.encode()).hexdigest()
-
-    payload = {
-        "sub": creds.name,
-        "email": creds.email,
-        "phone": creds.phonenumber
-    }
+    payload = {"sub": creds.name, "email": creds.email, "phone": creds.phonenumber}
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-    cursor.execute("""
+    insert_sql = """
         INSERT INTO chieniusers (email, name, phonenumber, password, token)
         VALUES (%s, %s, %s, %s, %s)
-    """, (creds.email, creds.name, creds.phonenumber, hashed_password, token))
+    """
+    cursor.execute(insert_sql, (creds.email, creds.name, creds.phonenumber, hashed_password, token))
     conn.commit()
 
     cursor.close()
     conn.close()
-
     return {"status": "Registered successfully", "token": token}
 
 # ---------------- OFFERS ----------------
-
 @app.api_route("/offers", methods=["GET", "POST"])
 async def offers(request: Request, referer: str | None = Header(None)):
     if not referer or not any(allowed in referer for allowed in ALLOWED_REFERRERS):
-        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super", status_code=307)
+        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
     if request.method == "POST":
         data = await request.json()
-
         product_id = data.get("product_id")
         new_price = data.get("new_price")
         offer_label = data.get("offer_label")
@@ -200,37 +218,36 @@ async def offers(request: Request, referer: str | None = Header(None)):
         conn.close()
         return JSONResponse(content={"status": "Offer saved successfully"})
 
-    else:
-        cursor.execute("""
+    # GET: Fetch active offers
+    cursor.execute("""
         SELECT p.ProductID, p.ProductName, p.Description,
                o.old_price, o.new_price, o.offer_label, o.start_date, o.end_date,
                p.image_filename
         FROM offers o
         JOIN SupermarketProducts p ON o.product_id = p.ProductID
         WHERE (o.end_date IS NULL OR o.end_date >= CURDATE())
-        """)
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
+    """)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
 
-        offers = []
-        for row in rows:
-            offers.append({
-                "ProductID": row["ProductID"],
-                "ProductName": row["ProductName"],
-                "Description": row["Description"],
-                "old_price": row["old_price"],
-                "new_price": row["new_price"],
-                "offer_label": row["offer_label"],
-                "start_date": row["start_date"],
-                "end_date": row["end_date"],
-                "image_url": generate_signed_url(row["image_filename"]) if row["image_filename"] else None
-            })
+    offers = []
+    for row in rows:
+        offers.append({
+            "ProductID": row["ProductID"],
+            "ProductName": row["ProductName"],
+            "Description": row["Description"],
+            "old_price": serialize_value(row["old_price"]),
+            "new_price": serialize_value(row["new_price"]),
+            "offer_label": row["offer_label"],
+            "start_date": serialize_value(row["start_date"]),
+            "end_date": serialize_value(row["end_date"]),
+            "image_url": generate_signed_url(row["image_filename"]) if row["image_filename"] else None
+        })
 
-        return JSONResponse(content={"status": "OK", "data": offers})
+    return JSONResponse(content={"status": "OK", "data": offers})
 
-# ---------------- PRODUCT UPLOAD ----------------
-
+# ---------------- UPLOAD PRODUCT ----------------
 @app.post("/upload")
 async def upload_file(
     ProductName: str = Form(...),
@@ -264,16 +281,12 @@ async def upload_file(
             INSERT INTO SupermarketProducts
             (ProductName, Category, Brand, UnitPrice, QuantityInStock, ExpiryDate, Description, image_filename)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            ProductName, Category, Brand, UnitPrice,
-            QuantityInStock, ExpiryDate, Description, public_id
-        ))
+        """, (ProductName, Category, Brand, UnitPrice, QuantityInStock, ExpiryDate, Description, public_id))
         conn.commit()
         cursor.close()
         conn.close()
 
         signed_url = generate_signed_url(public_id)
-
         return {"status": "OK", "message": "Product uploaded successfully.", "image_url": signed_url}
 
     except Exception as e:
@@ -281,12 +294,11 @@ async def upload_file(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-# ---------------- PRODUCT VIEW ----------------
-
+# ---------------- VIEW PRODUCTS ----------------
 @app.get("/viewchieni")
 async def view_memos(request: Request, referer: str | None = Header(None)):
     if not referer or not any(allowed in referer for allowed in ALLOWED_REFERRERS):
-        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super", status_code=307)
+        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -302,9 +314,9 @@ async def view_memos(request: Request, referer: str | None = Header(None)):
             'productName': row.get('ProductName', ''),
             'category': row['Category'],
             'brand': row['Brand'],
-            'unitprice': row['UnitPrice'],
-            'quantity': row['QuantityInStock'],
-            'expirydate': row['ExpiryDate'],
+            'unitprice': serialize_value(row['UnitPrice']),
+            'quantity': serialize_value(row['QuantityInStock']),
+            'expirydate': serialize_value(row['ExpiryDate']),
             'description': row['Description'],
             'image_url': image_url
         })
