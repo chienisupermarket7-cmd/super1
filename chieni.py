@@ -72,7 +72,7 @@ class Userregis(BaseModel):
     name: str
     phonenumber: int
     password: str
-
+ALLOWED_REFERRERS = ["https://chienisupermarket7-cmd.github.io"]
 
 
 @app.post("/login")
@@ -192,7 +192,11 @@ async def register(creds: Userregis):
         "token": token
     }
 @app.api_route("/offers", methods=["GET", "POST"])
-async def offers(request: Request):
+async def offers(request: Request, referer: str | None = Header(None)):
+    # ✅ Check Referer - if not from your site, redirect
+    if not referer or not any(allowed in referer for allowed in ALLOWED_REFERRERS):
+        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -202,13 +206,15 @@ async def offers(request: Request):
         product_id = data.get("product_id")
         new_price = data.get("new_price")
         offer_label = data.get("offer_label")
-        start_date = data.get("start_date")   # must be provided manually
-        end_date = data.get("end_date")       # must be provided manually
+        start_date = data.get("start_date")
+        end_date = data.get("end_date")
 
         if not product_id or not new_price:
+            cursor.close()
+            conn.close()
             raise HTTPException(status_code=400, detail="product_id and new_price are required")
 
-        # 🔥 fetch old price from products table
+        # 🔥 Fetch old price from products table
         cursor.execute("SELECT UnitPrice FROM SupermarketProducts WHERE ProductID=%s", (product_id,))
         product = cursor.fetchone()
         if not product:
@@ -233,9 +239,8 @@ async def offers(request: Request):
 
         cursor.close()
         conn.close()
-        return {"status": "Offer saved successfully"}
+        return JSONResponse(content={"status": "Offer saved successfully"})
 
-    # -------- GET: Customers fetch active offers --------
     elif request.method == "GET":
         sql = """
         SELECT p.ProductID, p.ProductName, p.Description,
@@ -264,7 +269,7 @@ async def offers(request: Request):
                 "image_url": generate_signed_url(row["image_filename"]) if row["image_filename"] else None
             })
 
-        return {"status": "OK", "data": offers}
+        return JSONResponse(content={"status": "OK", "data": offers})
 
 
 @app.post("/upload")
@@ -330,9 +335,13 @@ async def upload_file(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-
 @app.get("/viewchieni")
-async def view_memos(request: Request):
+async def view_memos(request: Request, referer: str | None = Header(None)):
+    # If no referer OR referer is not your website → redirect to homepage
+    if not referer or not any(allowed in referer for allowed in ALLOWED_REFERRERS):
+        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
+
+    # ✅ Normal product fetching
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM SupermarketProducts")
@@ -341,9 +350,8 @@ async def view_memos(request: Request):
 
     products = []
     for row in rows:
-        # ✅ Generate signed URL from public_id
         image_url = generate_signed_url(row['image_filename'])
-        product_data = {
+        products.append({
             'id': row['ProductID'],
             'productName': row.get('ProductName', ''),
             'category': row['Category'],
@@ -353,8 +361,6 @@ async def view_memos(request: Request):
             'expirydate': row['ExpiryDate'],
             'description': row['Description'],
             'image_url': image_url
-        }
+        })
 
-        products.append(product_data)
-
-    return {"status": "OK", "data": products}
+    return JSONResponse(content={"status": "OK", "data": products})
