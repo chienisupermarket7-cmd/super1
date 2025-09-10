@@ -333,6 +333,12 @@ async def upload_file(
 
 @app.get("/viewchieni")
 async def view_memos(request: Request):
+    # Check if the request is from a browser expecting HTML
+    accept_header = request.headers.get("accept", "")
+    if "text/html" in accept_header:
+        return RedirectResponse(url="https://chienisupermarket7-cmd.github.io/super")
+
+    # Otherwise, return JSON (API response)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM SupermarketProducts")
@@ -341,7 +347,6 @@ async def view_memos(request: Request):
 
     products = []
     for row in rows:
-        # ✅ Generate signed URL from public_id
         image_url = generate_signed_url(row['image_filename'])
         product_data = {
             'id': row['ProductID'],
@@ -354,7 +359,6 @@ async def view_memos(request: Request):
             'description': row['Description'],
             'image_url': image_url
         }
-
         products.append(product_data)
 
-    return {"status": "OK", "data": products}
+    return JSONResponse(content={"status": "OK", "data": products})
