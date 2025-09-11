@@ -1,37 +1,27 @@
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Request, Header, Depends
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Request, Header
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import json
 import pymysql
 import os
 from dotenv import load_dotenv
-import shutil
-import zipfile
-import io
-import requests
-import base64
-from jose import jwt, JWTError, ExpiredSignatureError   # ✅ fixed import
 import cloudinary
 import hashlib
 import cloudinary.uploader
 from pathlib import Path
 from pydantic import BaseModel
-from urllib.parse import quote
 from cloudinary.utils import cloudinary_url
 from datetime import datetime, timedelta
 from functools import partial
 import asyncio
-import smtplib
-from email.message import EmailMessage
-
 
 app = FastAPI()
 
 ALGORITHM = "HS256"
+INDEX_PAGE = "https://chienisupermarket7-cmd.github.io/super/index.html"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ Change "*" to a specific domain in production
+    allow_origins=["*"],  # ⚠️ In production, specify your frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,12 +29,7 @@ app.add_middleware(
 
 load_dotenv()
 
-SMTP_SERVER = os.getenv('SMTP_SERVER')   # Replace with your SMTP server
-SMTP_PORT = os.getenv('SMTP_PORT')       # Use 465 for SSL, 587 for TLS
-SMTP_USER = os.getenv('SMTP_USER')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
 SECRET_KEY = os.getenv('SECRET_KEY')
-
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 cloudinary.config(
@@ -72,70 +57,14 @@ class Userregis(BaseModel):
     name: str
     phonenumber: int
     password: str
-ALLOWED_REFERRERS = ["https://chienisupermarket7-cmd.github.io"]
 
+ALLOWED_REFERRERS = ["https://chienisupermarket7-cmd.github.io/super"]
 
-@app.post("/login")
-async def login(creds: User):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    # 1. Fetch user by email
-    sql = "SELECT * FROM chieniusers WHERE email=%s"
-    cursor.execute(sql, (creds.email,))
-    user = cursor.fetchone()
-
-    if not user:
-        cursor.close()
-        conn.close()
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # 2. Hash incoming password and compare with stored hash
-    hashed_input_password = hashlib.sha256(creds.password.encode()).hexdigest()
-    if hashed_input_password != user["password"]:
-        cursor.close()
-        conn.close()
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # 3. Generate JWT payload like /register
-    payload = {
-        "sub": user["name"],        # use name as subject
-        "email": user["email"],
-        "phone": user["phonenumber"],
-        "iat": datetime.utcnow(),
-        "exp": datetime.utcnow() + timedelta(days=1)
-    }
-    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-    # 4. Save token in DB
-    update_sql = "UPDATE users SET token=%s WHERE email=%s"
-    cursor.execute(update_sql, (token, user["email"]))
-    conn.commit()
-
-    cursor.close()
-    conn.close()
-
-    # 5. Return safe response
-    user.pop("password", None)
-    user["token"] = token
-
-    return {"status": "Login successful", "user": user}
-
-def verify_token(authorization: str = Header(...)):
-    try:
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer":
-            raise HTTPException(status_code=403, detail="Invalid authentication scheme")
-
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-
-    except ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-
-    except JWTError:
-        raise HTTPException(status_code=403, detail="Invalid token")
-
+# ✅ Check if request is from allowed frontend
+def verify_referrer(request: Request):
+    referer = request.headers.get("referer", "")
+    origin = request.headers.get("origin", "")
+    return any(allowed in referer or allowed in origin for allowed in ALLOWED_REFERRERS)
 
 def generate_signed_url(public_id: str) -> str:
     url, _ = cloudinary_url(
@@ -148,51 +77,12 @@ def generate_signed_url(public_id: str) -> str:
     )
     return url
 
-ALGORITHM = "HS256"
-
-@app.post("/register")
-async def register(creds: Userregis):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    # 1. Check if user exists
-    sql = "SELECT * FROM chieniusers WHERE email=%s"
-    cursor.execute(sql, (creds.email,))
-    user = cursor.fetchone()
-    if user:
-        cursor.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="This user already exists")
-
-    # 2. Hash password
-    hashed_password = hashlib.sha256(creds.password.encode()).hexdigest()
-
-    # 3. Create JWT payload for the new user
-    payload = {
-        "sub": creds.name,
-        "email": creds.email,
-        "phone": creds.phonenumber
-    }
-    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-    # 4. Insert new user into users table
-    insert_sql = """
-        INSERT INTO chieniusers (email, name, phonenumber, password, token)
-        VALUES (%s, %s, %s, %s, %s)
-    """
-    cursor.execute(insert_sql, (creds.email, creds.name, creds.phonenumber, hashed_password, token))
-    conn.commit()
-
-    cursor.close()
-    conn.close()
-
-    # 5. Return success with token
-    return {
-        "status": "Registered successfully",
-        "token": token
-    }
 @app.api_route("/offers", methods=["GET", "POST"])
 async def offers(request: Request):
+    # ✅ Block direct attacker requests
+    if not verify_referrer(request):
+        return RedirectResponse(url=INDEX_PAGE, status_code=302)
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -207,7 +97,6 @@ async def offers(request: Request):
         if not product_id or not new_price:
             raise HTTPException(status_code=400, detail="product_id and new_price are required")
 
-        # Fetch old price from products table
         cursor.execute("SELECT UnitPrice FROM SupermarketProducts WHERE ProductID=%s", (product_id,))
         product = cursor.fetchone()
         if not product:
@@ -217,62 +106,47 @@ async def offers(request: Request):
 
         old_price = product["UnitPrice"]
 
-        sql = """
-        INSERT INTO offers (product_id, old_price, new_price, offer_label, start_date, end_date)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            old_price = VALUES(old_price),
-            new_price = VALUES(new_price),
-            offer_label = VALUES(offer_label),
-            start_date = VALUES(start_date),
-            end_date = VALUES(end_date)
-        """
-        cursor.execute(sql, (product_id, old_price, new_price, offer_label, start_date, end_date))
+        cursor.execute("""
+            INSERT INTO offers (product_id, old_price, new_price, offer_label, start_date, end_date)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                old_price = VALUES(old_price),
+                new_price = VALUES(new_price),
+                offer_label = VALUES(offer_label),
+                start_date = VALUES(start_date),
+                end_date = VALUES(end_date)
+        """, (product_id, old_price, new_price, offer_label, start_date, end_date))
         conn.commit()
-
         cursor.close()
         conn.close()
         return {"status": "Offer saved successfully"}
 
     elif request.method == "GET":
-        # ✅ Step 1: Find expired offers
+        # ✅ Clean up expired offers
         cursor.execute("SELECT product_id, old_price FROM offers WHERE end_date IS NOT NULL AND end_date < CURDATE()")
         expired_offers = cursor.fetchall()
 
-        # ✅ Step 2: Restore product prices & delete expired offers
         for offer in expired_offers:
-            product_id = offer["product_id"]
-            old_price = offer["old_price"]
-
-            # Restore price in SupermarketProducts
-            cursor.execute(
-                "UPDATE SupermarketProducts SET UnitPrice=%s WHERE ProductID=%s",
-                (old_price, product_id)
-            )
-
-            # Delete the offer
-            cursor.execute("DELETE FROM offers WHERE product_id=%s", (product_id,))
-
+            cursor.execute("UPDATE SupermarketProducts SET UnitPrice=%s WHERE ProductID=%s",
+                           (offer["old_price"], offer["product_id"]))
+            cursor.execute("DELETE FROM offers WHERE product_id=%s", (offer["product_id"],))
         if expired_offers:
             conn.commit()
 
-        # ✅ Step 3: Fetch active offers
-        sql = """
-        SELECT p.ProductID, p.ProductName, p.Description,
-               o.old_price, o.new_price, o.offer_label, o.start_date, o.end_date,
-               p.image_filename
-        FROM offers o
-        JOIN SupermarketProducts p ON o.product_id = p.ProductID
-        WHERE (o.end_date IS NULL OR o.end_date >= CURDATE())
-        """
-        cursor.execute(sql)
+        cursor.execute("""
+            SELECT p.ProductID, p.ProductName, p.Description,
+                   o.old_price, o.new_price, o.offer_label, o.start_date, o.end_date,
+                   p.image_filename
+            FROM offers o
+            JOIN SupermarketProducts p ON o.product_id = p.ProductID
+            WHERE (o.end_date IS NULL OR o.end_date >= CURDATE())
+        """)
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
 
-        offers = []
-        for row in rows:
-            offers.append({
+        return {"status": "OK", "data": [
+            {
                 "ProductID": row["ProductID"],
                 "ProductName": row["ProductName"],
                 "Description": row["Description"],
@@ -282,11 +156,35 @@ async def offers(request: Request):
                 "start_date": row["start_date"],
                 "end_date": row["end_date"],
                 "image_url": generate_signed_url(row["image_filename"]) if row["image_filename"] else None
-            })
+            }
+            for row in rows
+        ]}
 
-        return {"status": "OK", "data": offers}
+@app.get("/viewchieni")
+async def view_memos(request: Request):
+    # ✅ Block direct attacker requests
+    if not verify_referrer(request):
+        return RedirectResponse(url=INDEX_PAGE, status_code=302)
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM SupermarketProducts")
+    rows = cursor.fetchall()
+    conn.close()
 
+    return {"status": "OK", "data": [
+        {
+            'id': row['ProductID'],
+            'productName': row.get('ProductName', ''),
+            'category': row['Category'],
+            'brand': row['Brand'],
+            'unitprice': row['UnitPrice'],
+            'quantity': row['QuantityInStock'],
+            'expirydate': row['ExpiryDate'],
+            'description': row['Description'],
+            'image_url': generate_signed_url(row['image_filename'])
+        } for row in rows
+    ]}
 
 @app.post("/upload")
 async def upload_file(
@@ -300,12 +198,10 @@ async def upload_file(
     image: UploadFile = File(...)
 ):
     try:
-        # 1️⃣ Read file and check size
         file_bytes = await image.read(MAX_FILE_SIZE + 1)
         if len(file_bytes) > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail="File too large. Max 5MB.")
 
-        # 2️⃣ Upload to Cloudinary
         upload_func = partial(
             cloudinary.uploader.upload,
             file_bytes,
@@ -317,65 +213,20 @@ async def upload_file(
         if not public_id:
             raise HTTPException(status_code=500, detail="Image upload failed.")
 
-        # 3️⃣ Save product in DB
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO SupermarketProducts
             (ProductName, Category, Brand, UnitPrice, QuantityInStock, ExpiryDate, Description, image_filename)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            ProductName,
-            Category,
-            Brand,
-            UnitPrice,
-            QuantityInStock,
-            ExpiryDate,
-            Description,
-            public_id
-        ))
+        """, (ProductName, Category, Brand, UnitPrice, QuantityInStock, ExpiryDate, Description, public_id))
         conn.commit()
         cursor.close()
         conn.close()
 
-        signed_url = generate_signed_url(public_id)
-
-        return {
-            "status": "OK",
-            "message": "Product uploaded successfully.",
-            "image_url": signed_url
-        }
+        return {"status": "OK", "message": "Product uploaded successfully.", "image_url": generate_signed_url(public_id)}
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-
-@app.get("/viewchieni")
-async def view_memos(request: Request):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM SupermarketProducts")
-    rows = cursor.fetchall()
-    conn.close()
-
-    products = []
-    for row in rows:
-        # ✅ Generate signed URL from public_id
-        image_url = generate_signed_url(row['image_filename'])
-        product_data = {
-            'id': row['ProductID'],
-            'productName': row.get('ProductName', ''),
-            'category': row['Category'],
-            'brand': row['Brand'],
-            'unitprice': row['UnitPrice'],
-            'quantity': row['QuantityInStock'],
-            'expirydate': row['ExpiryDate'],
-            'description': row['Description'],
-            'image_url': image_url
-        }
-
-        products.append(product_data)
-
-    return {"status": "OK", "data": products}
