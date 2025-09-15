@@ -88,7 +88,9 @@ def verify_referrer(request: Request) -> bool:
     referer = request.headers.get("referer", "")
     origin = request.headers.get("origin", "")
     return referer.startswith(FRONTEND_DOMAIN) or origin.startswith(FRONTEND_DOMAIN)
-
+@app.get("/")
+async def home():
+    return RedirectResponse(url=REDIRECT_URL, status_code=302)
 @app.post("/login")
 async def login(creds: User):
     conn = get_db_connection()
@@ -602,6 +604,7 @@ async def delete_product(product_id: int):
     conn.close()
 
     return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
 
 
 
