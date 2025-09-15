@@ -77,6 +77,11 @@ class Userregis(BaseModel):
     name: str
     phonenumber: int
     password: str
+class OfferUpdate(BaseModel):
+    new_price: float | None = None
+    offer_label: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
 
 # ✅ Function to verify request origin
 def verify_referrer(request: Request) -> bool:
@@ -361,10 +366,7 @@ async def view_memos(request: Request):
     return {"status": "OK", "data": products}
 # ✅ Get all categories
 @app.get("/supermarket/categories")
-async def get_categories(request: Request):
-    if not verify_referrer(request):
-        return RedirectResponse(url=REDIRECT_URL, status_code=302)
-
+async def get_categories():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT Category FROM SupermarketProducts")
@@ -376,10 +378,7 @@ async def get_categories(request: Request):
 
 # ✅ Get products by category (category in the URL)
 @app.get("/products/by-category/{category}")
-async def get_products_by_category(category: str, request: Request):
-    if not verify_referrer(request):
-        return RedirectResponse(url=REDIRECT_URL, status_code=302)
-
+async def get_products_by_category(category: str):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM SupermarketProducts WHERE Category = %s", (category,))
@@ -603,6 +602,7 @@ async def delete_product(product_id: int):
     conn.close()
 
     return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
 
 
 
