@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 import shutil
 import zipfile
+from typing import Optional
 import io
 import requests
 import base64
@@ -358,3 +359,250 @@ async def view_memos(request: Request):
         products.append(product_data)
 
     return {"status": "OK", "data": products}
+# ✅ Get all categories
+@app.get("/supermarket/categories")
+async def get_categories(request: Request):
+    if not verify_referrer(request):
+        return RedirectResponse(url=REDIRECT_URL, status_code=302)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT Category FROM SupermarketProducts")
+    rows = cursor.fetchall()
+    conn.close()
+
+    categories = [row["Category"] for row in rows]
+    return {"status": "OK", "categories": categories}
+
+# ✅ Get products by category (category in the URL)
+@app.get("/products/by-category/{category}")
+async def get_products_by_category(category: str, request: Request):
+    if not verify_referrer(request):
+        return RedirectResponse(url=REDIRECT_URL, status_code=302)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM SupermarketProducts WHERE Category = %s", (category,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    products = []
+    for row in rows:
+        image_url = generate_signed_url(row["image_filename"])
+        product_data = {
+            "ProductID": row["ProductID"],
+            "productName": row.get("ProductName", ""),
+            "category": row["Category"],
+            "Brand": row["Brand"],
+            "UnitPrice": row["UnitPrice"],
+            "QuantityInStock": row["QuantityInStock"],
+            "expirydate": row["ExpiryDate"],
+            "Description": row["Description"],
+            "image_url": image_url,
+        }
+        products.append(product_data)
+
+    return {"status": "OK", "products": products}
+@app.put("/offers/update/{product_id}")
+async def update_offer(product_id: int, data: OfferUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM offers WHERE product_id=%s", (product_id,))
+    offer = cursor.fetchone()
+    if not offer:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Offer not found for this product_id")
+
+    fields, values = [], []
+    if data.new_price is not None:
+        fields.append("new_price=%s")
+        values.append(data.new_price)
+    if data.offer_label is not None:
+        fields.append("offer_label=%s")
+        values.append(data.offer_label)
+    if data.start_date is not None:
+        fields.append("start_date=%s")
+        values.append(data.start_date)
+    if data.end_date is not None:
+        fields.append("end_date=%s")
+        values.append(data.end_date)
+
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update provided")
+
+    sql = f"UPDATE offers SET {', '.join(fields)} WHERE product_id=%s"
+    values.append(product_id)
+    cursor.execute(sql, tuple(values))
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {"status": "OK", "message": "Offer updated successfully"}
+@app.delete("/offers/delete/{product_id}")
+async def delete_offer(product_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # ✅ correct table name
+        cursor.execute("DELETE FROM offers WHERE product_id = %s", (product_id,))
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Offer not found")
+
+        cursor.close()
+        conn.close()
+        return {"status": "Offer deleted successfully", "product_id": product_id}
+
+    except pymysql.MySQLError as e:  # ✅ catch MySQL errors properly
+        raise HTTPException(status_code=500, detail=f"MySQL error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+@app.put("/products/update/{product_id}")
+async def update_product(
+    product_id: int,
+    ProductName: Optional[str] = Form(None),
+    Category: Optional[str] = Form(None),
+    Brand: Optional[str] = Form(None),
+    UnitPrice: Optional[float] = Form(None),
+    QuantityInStock: Optional[int] = Form(None),
+    ExpiryDate: Optional[str] = Form(None),
+    Description: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        fields = []
+        values = []
+
+        if ProductName is not None:
+            fields.append("ProductName = %s")
+            values.append(ProductName)
+
+        if Category is not None:
+            fields.append("Category = %s")
+            values.append(Category)
+
+        if Brand is not None:
+            fields.append("Brand = %s")
+            values.append(Brand)
+
+        if UnitPrice is not None:
+            fields.append("UnitPrice = %s")
+            values.append(UnitPrice)
+
+        if QuantityInStock is not None:
+            fields.append("QuantityInStock = %s")
+            values.append(QuantityInStock)
+
+        if ExpiryDate is not None:
+            fields.append("ExpiryDate = %s")
+            values.append(ExpiryDate)
+
+        if Description is not None:
+            fields.append("Description = %s")
+            values.append(Description)
+
+        # 🔥 Handle new image upload
+        if image is not None:
+            file_bytes = await image.read(MAX_FILE_SIZE + 1)
+            if len(file_bytes) > MAX_FILE_SIZE:
+                raise HTTPException(status_code=400, detail="File too large. Max 5MB.")
+
+            upload_func = partial(
+                cloudinary.uploader.upload,
+                file_bytes,
+                folder="products",
+                type="authenticated"
+            )
+            upload_result = await asyncio.to_thread(upload_func)
+            public_id = upload_result.get("public_id")
+            if not public_id:
+                raise HTTPException(status_code=500, detail="Image upload failed.")
+
+            fields.append("image_filename = %s")
+            values.append(public_id)
+
+        if not fields:
+            raise HTTPException(status_code=400, detail="No fields provided to update")
+
+        # ✅ Perform update
+        sql = f"""
+            UPDATE SupermarketProducts
+            SET {", ".join(fields)}
+            WHERE ProductID = %s
+        """
+        values.append(product_id)
+        cursor.execute(sql, tuple(values))
+        conn.commit()
+
+        # ✅ Fetch the full updated product
+        cursor.execute("SELECT * FROM SupermarketProducts WHERE ProductID = %s", (product_id,))
+        updated = cursor.fetchone()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="Product not found after update")
+
+        # ✅ Generate signed image URL
+        image_url = None
+        if updated.get("image_filename"):
+            image_url = generate_signed_url(updated["image_filename"])
+
+        updated_product = {
+            "ProductID": updated["ProductID"],
+            "ProductName": updated["ProductName"],
+            "Category": updated["Category"],
+            "Brand": updated["Brand"],
+            "UnitPrice": updated["UnitPrice"],
+            "QuantityInStock": updated["QuantityInStock"],
+            "ExpiryDate": updated["ExpiryDate"],
+            "Description": updated["Description"],
+            "image_url": image_url
+        }
+
+        return {
+            "status": "OK",
+            "message": "✅ Product updated successfully",
+            "product": updated_product
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()
+# ✅ Delete Product
+@app.delete("/products/{product_id}")
+async def delete_product(product_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # check if product exists
+    cursor.execute("SELECT * FROM SupermarketProducts WHERE ProductID=%s", (product_id,))
+    product = cursor.fetchone()
+    if not product:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # delete related offers first
+    cursor.execute("DELETE FROM offers WHERE product_id=%s", (product_id,))
+
+    # then delete the product itself
+    cursor.execute("DELETE FROM SupermarketProducts WHERE ProductID=%s", (product_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
+
+
