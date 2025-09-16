@@ -36,7 +36,7 @@ REDIRECT_URL = f"{FRONTEND_DOMAIN}/super"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_DOMAIN],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -604,6 +604,7 @@ async def delete_product(product_id: int):
     conn.close()
 
     return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
 
 
 
