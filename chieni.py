@@ -448,6 +448,44 @@ async def update_offer(product_id: int, data: OfferUpdate):
     conn.close()
 
     return {"status": "OK", "message": "Offer updated successfully"}
+@app.get("/data/offers/{limit}")
+async def get_offers(limit: int = 10):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 
+            o.id,
+            o.product_id,
+            o.old_price,
+            o.new_price,
+            o.offer_label,
+            o.start_date,
+            o.end_date,
+            p.ProductName AS product_name,
+            p.image_filename
+        FROM offers o
+        JOIN SupermarketProducts p ON o.product_id = p.ProductID
+        LIMIT %s
+    """, (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    offers = []
+    for row in rows:
+        offers.append({
+            "id": row["id"],
+            "product_id": row["product_id"],
+            "old_price": row["old_price"],
+            "new_price": row["new_price"],
+            "offer_label": row["offer_label"],
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
+            "product_name": row["product_name"],
+            "image_url": generate_signed_url(row["image_filename"])
+        })
+
+    return {"status": "OK", "rows": offers}
+
 @app.post("/offers/create/{product_id}")
 async def create_offer(product_id: int, data: OfferCreate):
     conn = get_db_connection()
@@ -654,6 +692,7 @@ async def delete_product(product_id: int):
     conn.close()
 
     return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
 
 
 
