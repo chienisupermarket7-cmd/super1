@@ -82,6 +82,12 @@ class OfferUpdate(BaseModel):
     offer_label: str | None = None
     start_date: str | None = None
     end_date: str | None = None
+class OfferCreate(BaseModel):
+    old_price: float
+    new_price: float
+    offer_label: str
+    start_date: str
+    end_date: str
 
 # ✅ Function to verify request origin
 def verify_referrer(request: Request) -> bool:
@@ -442,6 +448,50 @@ async def update_offer(product_id: int, data: OfferUpdate):
     conn.close()
 
     return {"status": "OK", "message": "Offer updated successfully"}
+@app.post("/offers/create/{product_id}")
+async def create_offer(product_id: int, data: OfferCreate):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        query = """
+        INSERT INTO offers (product_id, old_price, new_price, offer_label, start_date, end_date)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id, product_id, old_price, new_price, offer_label, start_date, end_date
+        """
+        cursor.execute(query, (
+            product_id,
+            data.old_price,
+            data.new_price,
+            data.offer_label,
+            data.start_date,
+            data.end_date
+        ))
+        new_offer = cursor.fetchone()
+        conn.commit()
+
+        return {
+            "status": "OK",
+            "message": "Offer created successfully",
+            "offer": {
+                "id": new_offer[0],
+                "product_id": new_offer[1],
+                "old_price": new_offer[2],
+                "new_price": new_offer[3],
+                "offer_label": new_offer[4],
+                "start_date": str(new_offer[5]),
+                "end_date": str(new_offer[6]),
+            }
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating offer: {str(e)}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
 @app.delete("/offers/delete/{product_id}")
 async def delete_offer(product_id: int):
     try:
@@ -604,6 +654,7 @@ async def delete_product(product_id: int):
     conn.close()
 
     return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
 
 
 
