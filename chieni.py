@@ -201,9 +201,7 @@ async def register(creds: Userregis):
 @app.api_route("/offers", methods=["GET", "POST"])
 async def offers(request: Request):
     # ✅ Redirect if coming from another site
-    if not verify_referrer(request):
-        return RedirectResponse(url=REDIRECT_URL, status_code=302)
-
+    
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -692,6 +690,7 @@ async def delete_product(product_id: int):
     conn.close()
 
     return {"status": "OK", "message": "Product and related offers deleted successfully"}
+
 
 
 
